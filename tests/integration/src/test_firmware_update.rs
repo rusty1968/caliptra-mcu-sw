@@ -1135,6 +1135,73 @@ mod test {
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// OpenPRoT counterpart of `run_hw_benchmark`: same host UA, package and
+    /// instrumentation, but the device runs the OpenPRoT `pldm_throughput_colo`
+    /// FPGA image as the MCU runtime instead of the native Tock runtime.
+    ///
+    /// Work in progress (see openprot-pldm-benchmark-plan.md): the OpenPRoT FD
+    /// does not yet publish FIRMWARE_PLDM_READY, report the package's device
+    /// UUID, or take the image size from UpdateComponent, so the exit status is
+    /// printed and not asserted. Read the UA log to see how far the update got.
+    #[cfg(feature = "fpga_realtime")]
+    fn run_openprot_hw_benchmark(label: &str, image: &[u8]) {
+        let pkg = get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), image);
+
+        println!("benchmark: {label} (OpenPRoT pldm_throughput_colo image)");
+
+        env::set_var(bench::BENCH_ENV, "1");
+        env::set_var(bench::SKIP_VALIDATION_ENV, "1");
+        env::set_var("CPTRA_FORCE_PLDM_READY", "1");
+        // The OpenPRoT router drops packets whose destination EID is not its own,
+        // so address the FD (EID 8) as the UA (EID 10, the FD's UA_EID).
+        env::set_var("CPTRA_MCTP_STRICT_EIDS", "10,8");
+
+        let mut hw = start_runtime_hw_model(TestParams {
+            custom_mcu_runtime: Some(include_bytes!("openprot_pldm_throughput_colo.bin").to_vec()),
+            i3c_port: Some(PortPicker::new().random(true).pick().unwrap()),
+            ..Default::default()
+        });
+        hw.start_i3c_controller();
+
+        let transport =
+            MctpTransport::new(hw.i3c_port().unwrap(), hw.i3c_address().unwrap().into());
+        let socket = transport
+            .create_socket(EndpointId(0x08), EndpointId(0))
+            .unwrap();
+        let mut daemon = PldmDaemon::run(
+            socket,
+            Options {
+                caliptra_mcu_pldm_fw_pkg: Some(pkg),
+                discovery_sm_actions: discovery_sm::DefaultActions {},
+                update_sm_actions: update_sm::DefaultActions {},
+                fd_tid: 0x01,
+                rerun_count: 0,
+            },
+        )
+        .unwrap();
+
+        let status = finish_runtime_hw_model(&mut hw);
+        run_exit_hooks(status);
+        daemon.stop();
+        stop_emulator();
+        env::remove_var(bench::BENCH_ENV);
+        env::remove_var(bench::SKIP_VALIDATION_ENV);
+        env::remove_var("CPTRA_FORCE_PLDM_READY");
+        env::remove_var("CPTRA_MCTP_STRICT_EIDS");
+        println!("OpenPRoT PLDM benchmark exit status: {status}");
+    }
+
+    /// OpenPRoT PLDM benchmark with a fixed 64 KiB payload.
+    #[cfg(feature = "fpga_realtime")]
+    #[test]
+    fn test_openprot_pldm_benchmark_64k() {
+        const PAYLOAD: usize = 64 * 1024;
+        let lock = TEST_LOCK.lock().unwrap();
+        let image: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
+        run_openprot_hw_benchmark("OpenPRoT fixed 64 KiB payload", &image);
+        lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// HwModel PLDM benchmark with a real update flash image as the payload
     /// (Caliptra FW, SoC manifest, MCU runtime, SoC images), to expose costs
     /// that only show up over a long transfer. Same firmware and harness as

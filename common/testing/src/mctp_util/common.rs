@@ -15,6 +15,9 @@ const DEFAULT_PKT_PAYLOAD_SIZE: usize = 64;
 #[derive(Debug, Clone)]
 pub struct MctpUtil {
     dest_eid: u8,
+    /// When set, `new_req` addresses requests to this EID instead of the null
+    /// EID 0. Test-only, for endpoints that route strictly on EID.
+    req_dest_eid: Option<u8>,
     src_eid: u8,
     msg_tag: u8,
     tag_owner: u8,
@@ -56,6 +59,7 @@ impl MctpUtil {
     pub fn new() -> MctpUtil {
         MctpUtil {
             dest_eid: 0,
+            req_dest_eid: None,
             src_eid: LOCAL_TEST_ENDPOINT_EID,
             msg_tag: DEFAULT_MSG_TAG,
             tag_owner: 1,
@@ -65,7 +69,7 @@ impl MctpUtil {
     }
 
     pub fn new_req(&mut self, msg_tag: u8) {
-        self.dest_eid = 0;
+        self.dest_eid = self.req_dest_eid.unwrap_or(0);
         self.msg_tag = msg_tag;
         self.tag_owner = 1;
     }
@@ -88,6 +92,12 @@ impl MctpUtil {
     #[allow(dead_code)]
     pub fn set_dest_eid(&mut self, eid: u8) {
         self.dest_eid = eid;
+    }
+
+    /// Address every request (`new_req`) to `eid` instead of the null EID 0.
+    /// Test-only, for endpoints that route strictly on EID.
+    pub fn set_request_dest_eid(&mut self, eid: Option<u8>) {
+        self.req_dest_eid = eid;
     }
 
     #[allow(dead_code)]
@@ -549,6 +559,13 @@ impl MctpUtil {
         message_identifier: &MessageIdentifier,
     ) -> Vec<u8> {
         let mut msg: Vec<u8> = Vec::new();
+        // DSP0236 lets a message start at any packet sequence number (0-3) and
+        // count up from there, so take the first packet's number as the base.
+        let first_seq = packets.front().map_or(0, |p| {
+            let hdr: MCTPHdr<[u8; MCTP_HDR_SIZE]> =
+                MCTPHdr::read_from_bytes(&p[0..MCTP_HDR_SIZE]).unwrap();
+            hdr.pkt_seq()
+        });
         for (i, pkt) in packets.iter().enumerate() {
             let mctp_hdr: MCTPHdr<[u8; MCTP_HDR_SIZE]> =
                 MCTPHdr::read_from_bytes(&pkt[0..MCTP_HDR_SIZE]).unwrap();
@@ -558,7 +575,7 @@ impl MctpUtil {
             if i == packets.len() - 1 {
                 assert_eq!(mctp_hdr.eom(), 1);
             }
-            let seq_num = (i % 4) as u8;
+            let seq_num = ((first_seq as usize + i) % 4) as u8;
             assert_eq!(mctp_hdr.dest_eid(), message_identifier.dest_eid);
             assert_eq!(mctp_hdr.tag_owner(), message_identifier.tag_owner);
             assert_eq!(mctp_hdr.msg_tag(), message_identifier.msg_tag);

@@ -47,10 +47,25 @@ struct MctpPldmSocketData {
     first_response: Option<Vec<u8>>,
 }
 
+/// Test-only override for device stacks that route strictly on EID (for example
+/// OpenPRoT). `CPTRA_MCTP_STRICT_EIDS="<ua eid>,<fd eid>"` (decimal) makes every
+/// UA -> FD packet use those EIDs as source and destination, instead of the
+/// default destination of 0 for requests. Unset, behaviour is unchanged.
+fn strict_eids() -> Option<(u8, u8)> {
+    let value = std::env::var("CPTRA_MCTP_STRICT_EIDS").ok()?;
+    let (ua, fd) = value.split_once(',')?;
+    Some((ua.trim().parse().ok()?, fd.trim().parse().ok()?))
+}
+
 impl PldmSocket for MctpPldmSocket {
     fn send(&self, payload: &[u8]) -> Result<(), PldmTransportError> {
         let mut mctp_util = MctpUtil::new();
         mctp_util.set_src_eid(self.source.0);
+        let strict = strict_eids();
+        if let Some((ua, fd)) = strict {
+            mctp_util.set_src_eid(ua);
+            mctp_util.set_request_dest_eid(Some(fd));
+        }
         let mut mctp_common_header = MctpCommonHeader(0);
         mctp_common_header.set_ic(0);
         mctp_common_header.set_msg_type(MCTP_PLDM_MSG_TYPE);
@@ -76,6 +91,9 @@ impl PldmSocket for MctpPldmSocket {
             mctp_util.set_boot_delay_ticks(0);
             let mut rx = self.rx_stream.lock().unwrap();
             mctp_util.new_req(self.msg_tag);
+            if let Some((_, fd)) = strict {
+                mctp_util.set_dest_eid(fd);
+            }
             let response = mctp_util.wait_for_responder(
                 self.msg_tag,
                 mctp_payload.as_mut_slice(),
@@ -92,6 +110,9 @@ impl PldmSocket for MctpPldmSocket {
                 .try_clone()
                 .map_err(|_| PldmTransportError::Disconnected)?;
             if is_request {
+                if let Some((_, fd)) = strict {
+                    mctp_util.set_dest_eid(fd);
+                }
                 mctp_util.send_request(
                     self.msg_tag,
                     mctp_payload.as_mut_slice(),
@@ -100,8 +121,16 @@ impl PldmSocket for MctpPldmSocket {
                 );
             } else {
                 let msg_tag = *self.response_msg_tag.lock().unwrap();
-                mctp_util.set_src_eid(self.dest.0);
-                mctp_util.set_dest_eid(self.source.0);
+                if let Some((ua, fd)) = strict {
+                    // `send_response` calls `new_resp`, which swaps source and
+                    // destination, so set them pre-swapped (FD as source, UA as
+                    // destination) to send UA -> FD.
+                    mctp_util.set_src_eid(fd);
+                    mctp_util.set_dest_eid(ua);
+                } else {
+                    mctp_util.set_src_eid(self.dest.0);
+                    mctp_util.set_dest_eid(self.source.0);
+                }
                 mctp_util.set_msg_tag(msg_tag & MCTP_TAG_MASK);
                 mctp_util.send_response(mctp_payload.as_mut_slice(), &mut stream, self.target_addr);
             }

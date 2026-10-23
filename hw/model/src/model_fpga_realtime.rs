@@ -122,8 +122,13 @@ impl ModelFpgaRealtime {
             SpdmResponderTransport::Doe,
             milestones.contains(McuBootMilestones::FIRMWARE_SPDM_DOE_READY),
         );
-        self.state
-            .set_pldm_ready(milestones.contains(McuBootMilestones::FIRMWARE_PLDM_READY));
+        // Test-only override for device stacks that do not publish the
+        // FIRMWARE_PLDM_READY milestone (for example OpenPRoT), so the host UA
+        // is not held until its readiness timeout.
+        let force_pldm_ready = std::env::var_os("CPTRA_FORCE_PLDM_READY").is_some();
+        self.state.set_pldm_ready(
+            force_pldm_ready || milestones.contains(McuBootMilestones::FIRMWARE_PLDM_READY),
+        );
     }
 
     /// Set or clear the FIPS zeroization PPD signal in the FPGA wrapper
